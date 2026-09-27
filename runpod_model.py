@@ -302,7 +302,8 @@ def cmd_deploy(args: argparse.Namespace) -> None:
     count = args.gpu_count or model.gpu_count
     cloud = args.cloud_type or os.getenv("RUNPOD_CLOUD_TYPE", "SECURE")
     volume_gb = args.volume_gb or int(os.getenv("RUNPOD_VOLUME_GB", str(model.recommended_volume_gb)))
-    container_gb = args.container_disk_gb or int(os.getenv("RUNPOD_CONTAINER_DISK_GB", str(model.recommended_container_disk_gb)))
+    requested_container_gb = args.container_disk_gb or int(os.getenv("RUNPOD_CONTAINER_DISK_GB", "0"))
+    container_gb = max(requested_container_gb, model.recommended_container_disk_gb)
     mount = os.getenv("RUNPOD_VOLUME_MOUNT_PATH", "/workspace")
     cache = "/root/.cache/huggingface" if args.ephemeral else os.getenv("RUNPOD_MODEL_CACHE", "/workspace/huggingface")
     name = args.name or f"llm-{model.key}"
@@ -332,7 +333,7 @@ def cmd_deploy(args: argparse.Namespace) -> None:
     print(textwrap.dedent(f"""\
         Deploying {model.huggingface_id}
           GPU: {count}x {gpu} (model floor: {model.min_vram_gb} GB total)
-          Storage: {"ephemeral container disk" if args.ephemeral else f"{volume_gb} GB persistent volume mounted at {mount}"}
+          Storage: {f"{container_gb} GB ephemeral container disk" if args.ephemeral else f"{volume_gb} GB persistent volume mounted at {mount}"}
           Endpoint after startup: https://<pod-id>-8000.proxy.runpod.net/v1
         Check exact live availability and hourly price first with: podcode gpus
     """))
