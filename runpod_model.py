@@ -30,6 +30,7 @@ STATE_PATH = ROOT / ".runpod-manager-state.json"
 # Pin the image used during validation; `latest` can change its CLI or runtime
 # behavior without a podcode release.
 VLLM_IMAGE = "vllm/vllm-openai:v0.30.0"
+DEFAULT_MODEL = "qwen3-coder-next"
 
 
 @dataclass(frozen=True)
@@ -579,19 +580,28 @@ def parser() -> argparse.ArgumentParser:
     logs.set_defaults(func=cmd_logs)
     sub.add_parser("usage", help="show Pods and billing guidance").set_defaults(func=cmd_usage)
 
-    def add_deploy_options(target: argparse.ArgumentParser) -> None:
-        target.add_argument("model", choices=sorted(MODELS))
+    def add_deploy_options(target: argparse.ArgumentParser, *, up_defaults: bool = False) -> None:
+        target.add_argument("model", nargs="?" if up_defaults else None, choices=sorted(MODELS),
+                            default=DEFAULT_MODEL if up_defaults else None,
+                            help=f"model preset (default: {DEFAULT_MODEL})" if up_defaults else None)
         target.add_argument("--name")
         target.add_argument("--gpu", help="override the recommended Runpod GPU name")
         target.add_argument("--gpu-count", type=int, help="override number of GPUs")
         target.add_argument("--cloud-type", choices=("SECURE", "COMMUNITY"))
         target.add_argument("--volume-gb", type=int, help="Pod-attached volume size (ignored with --network-volume-id)")
         target.add_argument("--network-volume-id", help="reusable Runpod network volume; preserves the model cache across swaps")
-        target.add_argument("--ephemeral", action="store_true", help="do not create a persistent volume; model cache is discarded with the Pod")
+        if up_defaults:
+            storage = target.add_mutually_exclusive_group()
+            storage.add_argument("--ephemeral", dest="ephemeral", action="store_true", help="discard model storage when the Pod is deleted (default)")
+            storage.add_argument("--persistent", dest="ephemeral", action="store_false", help="create a persistent Pod volume for the model cache")
+            target.set_defaults(ephemeral=True)
+        else:
+            target.add_argument("--ephemeral", action="store_true", help="do not create a persistent volume; model cache is discarded with the Pod")
         target.add_argument("--container-disk-gb", type=int)
         target.add_argument("--stop-after", help="auto-stop duration, e.g. 8h")
         target.add_argument("--terminate-after", help="auto-delete duration, e.g. 24h")
-        target.add_argument("--estimate-hours", type=float, default=1, help="hours used for the preflight cost estimate (default: 1)")
+        target.add_argument("--estimate-hours", type=float, default=10 if up_defaults else 1,
+                            help=f"hours used for the preflight cost estimate (default: {10 if up_defaults else 1})")
         target.add_argument("--wait-timeout", type=duration_seconds, default=1800, metavar="DURATION", help="wait for vLLM readiness; default: 30m")
 
     deploy = sub.add_parser("deploy", help="create a vLLM Pod and load a model")
@@ -599,7 +609,7 @@ def parser() -> argparse.ArgumentParser:
     deploy.set_defaults(func=cmd_deploy)
 
     up = sub.add_parser("up", help="single command: cost preflight, deploy, then configure local OpenCode")
-    add_deploy_options(up)
+    add_deploy_options(up, up_defaults=True)
     up.add_argument("--opencode-output", default="opencode.json", help="local OpenCode config path")
     up.add_argument("--force-opencode-config", action="store_true", help="replace the generated OpenCode config if it exists")
     up.set_defaults(func=cmd_up)

@@ -55,8 +55,12 @@ runpodctl config --apiKey "$RUNPOD_API_KEY"
 From your code repository:
 
 ```sh
-podcode up qwen3-coder-next --estimate-hours 10 --ephemeral
+podcode up
 ```
+
+With no arguments, `podcode up` deploys `qwen3-coder-next`, estimates a
+10-hour session, and uses ephemeral storage. Override the model or use
+`--persistent` when you need retained model storage.
 
 Type `DEPLOY` when shown the live cost. This command:
 
