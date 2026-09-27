@@ -268,7 +268,13 @@ def vllm_loading_stage(pod_id: str) -> str:
 
 def wait_for_vllm(pod_id: str, timeout_seconds: float) -> None:
     """Show deploy progress until the public vLLM health endpoint responds."""
-    url = f"https://{pod_id}-8000.proxy.runpod.net/health"
+    vllm_key = os.getenv("RUNPOD_VLLM_API_KEY")
+    if not vllm_key:
+        raise SystemExit("RUNPOD_VLLM_API_KEY is required to check vLLM readiness.")
+    # Probe an authenticated OpenAI-compatible endpoint.  /health is also
+    # protected when vLLM is started with --api-key, so an unauthenticated
+    # health probe would wait forever even after the server has started.
+    url = f"https://{pod_id}-8000.proxy.runpod.net/v1/models"
     started = time.monotonic()
     frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     index = 0
@@ -277,7 +283,8 @@ def wait_for_vllm(pod_id: str, timeout_seconds: float) -> None:
     try:
         while time.monotonic() - started < timeout_seconds:
             try:
-                with urllib.request.urlopen(url, timeout=10) as response:
+                request = urllib.request.Request(url, headers={"Authorization": f"Bearer {vllm_key}"})
+                with urllib.request.urlopen(request, timeout=10) as response:
                     if response.status == 200:
                         elapsed = int(time.monotonic() - started)
                         print(f"\r✓ vLLM is ready after {elapsed // 60}m {elapsed % 60:02d}s.{' ' * 20}")
@@ -529,12 +536,15 @@ def cmd_swap(args: argparse.Namespace) -> None:
 def cmd_opencode(args: argparse.Namespace) -> None:
     """Write a project-local OpenCode custom-provider config without overwriting one."""
     model = choose_model(args.model)
+    vllm_key = os.getenv("RUNPOD_VLLM_API_KEY")
+    if not vllm_key:
+        raise SystemExit("RUNPOD_VLLM_API_KEY is required to configure OpenCode.")
     target = Path(args.output).resolve()
     config = {
         "$schema": "https://opencode.ai/config.json",
         "model": f"runpod/{model.huggingface_id}",
         "provider": {"runpod": {"npm": "@ai-sdk/openai-compatible", "name": "Runpod vLLM", "options": {
-            "baseURL": f"https://{args.pod_id}-8000.proxy.runpod.net/v1", "apiKey": "{env:RUNPOD_VLLM_API_KEY}"},
+            "baseURL": f"https://{args.pod_id}-8000.proxy.runpod.net/v1", "apiKey": vllm_key},
             "models": {model.huggingface_id: {"name": model.key, "limit": {
                 "context": model.max_model_len or 32768, "output": 8192}}}}},
     }
@@ -552,6 +562,8 @@ def cmd_opencode(args: argparse.Namespace) -> None:
         current["provider"]["runpod"] = config["provider"]["runpod"]
         config = current
     target.write_text(json.dumps(config, indent=2) + "\n")
+    # This generated config contains the local vLLM key and is gitignored.
+    target.chmod(0o600)
     print(f"Wrote {target}\nStart OpenCode in this directory; default model: runpod/{model.huggingface_id}")
     opencode = shutil.which("opencode")
     if opencode:
