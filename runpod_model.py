@@ -186,7 +186,9 @@ def vllm_loading_stage(pod_id: str) -> str:
         except json.JSONDecodeError:
             continue
     recent = "\n".join(lines).lower()
-    if any(word in recent for word in ("out of memory", "traceback", "error", "exception")):
+    latest_error = max((index for index, line in enumerate(lines) if any(word in line.lower() for word in ("out of memory", "traceback", "runtimeerror", "exception"))), default=-1)
+    latest_load = max((index for index, line in enumerate(lines) if "loading model from scratch" in line.lower() or "loading model weights" in line.lower()), default=-1)
+    if latest_error > latest_load:
         return "vLLM reported a startup error; inspect `podcode logs " + pod_id + "`"
     if "api server" in recent and "started" in recent:
         return "vLLM API server is starting"
