@@ -81,8 +81,8 @@ Recommended starting point: `qwen3-coder-next` on a 48 GB A6000/A40, using its v
 
 ```sh
 podcode status
-podcode wait POD_ID             # live GPU/model-loading stage until vLLM is ready
-podcode logs POD_ID             # detailed live container logs
+podcode wait                    # live GPU/model-loading stage; uses the only Pod automatically
+podcode logs                    # detailed live container logs; uses the only Pod automatically
 podcode stop POD_ID
 podcode start POD_ID
 podcode destroy POD_ID

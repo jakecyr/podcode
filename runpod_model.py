@@ -365,14 +365,32 @@ def cmd_status(_: argparse.Namespace) -> None:
     print("\nTip: `runpodctl pod get POD_ID` shows SSH and proxy connection details.")
 
 
+def resolve_pod_id(pod_id: str | None) -> str:
+    if pod_id:
+        return pod_id
+    try:
+        pods = json.loads(ctl_output(["pod", "list", "--all"]))
+    except json.JSONDecodeError as error:
+        raise SystemExit("Runpod returned an unreadable Pod list; specify POD_ID explicitly.") from error
+    if not isinstance(pods, list):
+        raise SystemExit("Runpod returned an unexpected Pod list; specify POD_ID explicitly.")
+    if len(pods) == 1 and isinstance(pods[0], dict) and isinstance(pods[0].get("id"), str):
+        inferred = pods[0]["id"]
+        print(f"Using the only Pod: {inferred}")
+        return inferred
+    if not pods:
+        raise SystemExit("No Pods found. Create one with `podcode up MODEL` first.")
+    raise SystemExit("Multiple Pods found; specify POD_ID (see `podcode status`).")
+
+
 def cmd_wait(args: argparse.Namespace) -> None:
     """Poll a Pod's vLLM health endpoint and concise GPU-loading stage."""
-    wait_for_vllm(args.pod_id, args.timeout)
+    wait_for_vllm(resolve_pod_id(args.pod_id), args.timeout)
 
 
 def cmd_logs(args: argparse.Namespace) -> None:
     """Pass through container logs for detailed startup diagnosis."""
-    ctl(["pod", "logs", args.pod_id, "--follow"])
+    ctl(["pod", "logs", resolve_pod_id(args.pod_id), "--follow"])
 
 
 def cmd_control(args: argparse.Namespace) -> None:
@@ -461,11 +479,11 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("gpus", help="show live Runpod GPU availability and prices").set_defaults(func=cmd_gpus)
     sub.add_parser("status", help="list all Pods").set_defaults(func=cmd_status)
     wait = sub.add_parser("wait", help="poll vLLM readiness and GPU model-loading progress")
-    wait.add_argument("pod_id")
+    wait.add_argument("pod_id", nargs="?", help="Pod ID; inferred when exactly one Pod exists")
     wait.add_argument("--timeout", type=duration_seconds, default=1800, metavar="DURATION", help="maximum wait; default: 30m")
     wait.set_defaults(func=cmd_wait)
     logs = sub.add_parser("logs", help="stream detailed container logs for a Pod")
-    logs.add_argument("pod_id")
+    logs.add_argument("pod_id", nargs="?", help="Pod ID; inferred when exactly one Pod exists")
     logs.set_defaults(func=cmd_logs)
     sub.add_parser("usage", help="show Pods and billing guidance").set_defaults(func=cmd_usage)
 
