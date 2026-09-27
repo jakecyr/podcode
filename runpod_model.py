@@ -159,6 +159,30 @@ def redact_secrets(text: str) -> str:
     return re.sub(r"\bhf_[A-Za-z0-9_-]+\b", "***", text)
 
 
+def print_pod_submission(output: str) -> None:
+    """Render Runpod's JSON create response without exposing noisy metadata."""
+    try:
+        pod = json.loads(output)
+    except json.JSONDecodeError:
+        print(redact_secrets(output), end="" if output.endswith("\n") else "\n")
+        return
+    if not isinstance(pod, dict):
+        print(redact_secrets(output), end="" if output.endswith("\n") else "\n")
+        return
+    machine = pod.get("machine") if isinstance(pod.get("machine"), dict) else {}
+    print(color("\n✓ Pod submitted", "32"))
+    for label, value in (
+        ("Pod ID", pod.get("id")),
+        ("Status", pod.get("desiredStatus")),
+        ("GPU", f"{pod.get('gpuCount', 1)}x {machine.get('gpuDisplayName', pod.get('gpuDisplayName', 'requested GPU'))}"),
+        ("Location", machine.get("location")),
+        ("Rate", f"${pod['costPerHr']}/hour" if pod.get("costPerHr") is not None else None),
+        ("Container disk", f"{pod['containerDiskInGb']} GB" if pod.get("containerDiskInGb") is not None else None),
+    ):
+        if value is not None:
+            print(f"  {color(label + ':', '2')} {value}")
+
+
 def require_timer_support(stop_after: str | None, terminate_after: str | None) -> None:
     """Avoid accepting a cost-control option the installed CLI cannot submit."""
     if not (stop_after or terminate_after):
@@ -398,11 +422,11 @@ def cmd_deploy(args: argparse.Namespace) -> None:
         message = result.stderr.strip() or result.stdout.strip() or "runpodctl could not create the Pod."
         raise SystemExit(message)
     if result.stdout:
-        output = redact_secrets(result.stdout)
-        print(output, end="" if output.endswith("\n") else "\n")
+        print_pod_submission(result.stdout)
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
-    print("\nPod submitted. Run `podcode status` to get its ID and endpoint. Model weights download on first boot and remain on the Pod volume.")
+    print(color("\nWaiting for vLLM readiness…", "36"))
+    print("First boot downloads the model to the selected Pod storage.")
     # runpodctl output varies by version; accept its explicit id fields only.
     match = re.search(r'(?im)(?:pod\s*(?:id)?|"id")\s*[:=]\s*["\']?([a-z0-9]{6,})', result.stdout)
     pod_id = match.group(1) if match else None
