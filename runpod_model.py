@@ -367,8 +367,9 @@ def confirm(word: str, message: str) -> None:
     print(f"\n{color('!', '33')} {message}")
     try:
         answer = input(f"Type {color(word, '33')} to continue › ").strip()
-    except EOFError:
-        answer = ""
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled. No Runpod resources were created or deleted.")
+        raise SystemExit(0)
     if answer != word:
         raise SystemExit("Cancelled. No Runpod resources were created or deleted.")
 
