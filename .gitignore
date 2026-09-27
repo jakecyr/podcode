@@ -1,6 +1,8 @@
 .env
 .venv/
 node_modules/
+opencode.json
+opencode.runpod.json
 __pycache__/
 *.pyc
 .runpod-manager-state.json

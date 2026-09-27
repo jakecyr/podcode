@@ -55,7 +55,7 @@ runpodctl config --apiKey "$RUNPOD_API_KEY"
 From your code repository:
 
 ```sh
-podcode up qwen3-coder-next --estimate-hours 10 --terminate-after 10h --ephemeral
+podcode up qwen3-coder-next --estimate-hours 10 --ephemeral
 ```
 
 Type `DEPLOY` when shown the live cost. This command:

@@ -27,7 +27,9 @@ from typing import Iterable
 
 ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / ".runpod-manager-state.json"
-VLLM_IMAGE = "vllm/vllm-openai:latest"
+# Pin the image used during validation; `latest` can change its CLI or runtime
+# behavior without a podcode release.
+VLLM_IMAGE = "vllm/vllm-openai:v0.30.0"
 
 
 @dataclass(frozen=True)
@@ -145,6 +147,15 @@ def ctl_output(arguments: Iterable[str]) -> str:
     if result.returncode:
         raise SystemExit(result.stderr.strip() or "Runpod could not retrieve live GPU pricing.")
     return result.stdout
+
+
+def redact_secrets(text: str) -> str:
+    """Prevent Pod-create responses from echoing local API tokens to the terminal."""
+    for name in ("RUNPOD_API_KEY", "RUNPOD_VLLM_API_KEY", "HF_TOKEN"):
+        value = os.getenv(name)
+        if value:
+            text = text.replace(value, "***")
+    return re.sub(r"\bhf_[A-Za-z0-9_-]+\b", "***", text)
 
 
 def require_timer_support(stop_after: str | None, terminate_after: str | None) -> None:
@@ -386,7 +397,8 @@ def cmd_deploy(args: argparse.Namespace) -> None:
         message = result.stderr.strip() or result.stdout.strip() or "runpodctl could not create the Pod."
         raise SystemExit(message)
     if result.stdout:
-        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+        output = redact_secrets(result.stdout)
+        print(output, end="" if output.endswith("\n") else "\n")
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
     print("\nPod submitted. Run `podcode status` to get its ID and endpoint. Model weights download on first boot and remain on the Pod volume.")
@@ -516,6 +528,11 @@ def cmd_opencode(args: argparse.Namespace) -> None:
         config = current
     target.write_text(json.dumps(config, indent=2) + "\n")
     print(f"Wrote {target}\nStart OpenCode in this directory; default model: runpod/{model.huggingface_id}")
+    opencode = shutil.which("opencode")
+    if opencode:
+        reload_result = subprocess.run([opencode, "reload"], text=True, capture_output=True, check=False)
+        if reload_result.returncode == 0:
+            print("Reloaded OpenCode configuration for the new Pod.")
 
 
 def cmd_up(args: argparse.Namespace) -> None:
