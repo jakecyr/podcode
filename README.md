@@ -106,7 +106,8 @@ Use `--ephemeral` for disposable sessions: no persistent volume, no retained mod
 
 The `qwen3-coder-next` ephemeral preset requests a 100 GB container disk because
 its model download needs more than the Runpod 20–30 GB default. On a 48 GB GPU,
-it also caps vLLM concurrency at 64 sequences so its Mamba cache can initialize.
+it also caps vLLM concurrency at 64 sequences so its Mamba cache can initialize,
+and enables Qwen's vLLM tool-call parser for OpenCode agents.
 
 Without it, podcode creates a model-sized Pod volume (60 GB for Qwen3-Coder-Next) at `/workspace` so future starts avoid downloading weights again. For portable storage across replacement Pods, pass `--network-volume-id VOLUME_ID`.
 

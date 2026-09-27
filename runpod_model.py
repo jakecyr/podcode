@@ -47,6 +47,7 @@ class Model:
     recommended_volume_gb: int = 60
     recommended_container_disk_gb: int = 30
     max_num_seqs: int | None = None
+    tool_call_parser: str | None = None
 
 
 # VRAM is a deployment floor, not a training requirement. Values assume inference
@@ -59,7 +60,7 @@ MODELS: dict[str, Model] = {
     "qwen2.5-coder-7b": Model("qwen2.5-coder-7b", "Qwen/Qwen2.5-Coder-7B-Instruct", "7B", 16, "NVIDIA GeForce RTX 3090", note="An economical 24 GB option."),
     "qwen2.5-coder-14b": Model("qwen2.5-coder-14b", "Qwen/Qwen2.5-Coder-14B-Instruct", "14B", 24, "NVIDIA GeForce RTX 4090", note="24 GB supports typical coding workloads."),
     "qwen2.5-coder-32b": Model("qwen2.5-coder-32b", "Qwen/Qwen2.5-Coder-32B-Instruct", "32B", 48, "NVIDIA A40", note="48 GB leaves useful room for KV cache."),
-    "qwen3-coder-next": Model("qwen3-coder-next", "RedHatAI/Qwen3-Next-80B-A3B-Instruct-quantized.w4a16", "80B MoE / 3B active", 48, "NVIDIA RTX A6000", max_model_len=32768, note="Default coding-agent choice; verified vLLM-compatible 4-bit checkpoint.", recommended_container_disk_gb=100, max_num_seqs=64),
+    "qwen3-coder-next": Model("qwen3-coder-next", "RedHatAI/Qwen3-Next-80B-A3B-Instruct-quantized.w4a16", "80B MoE / 3B active", 48, "NVIDIA RTX A6000", max_model_len=32768, note="Default coding-agent choice; verified vLLM-compatible 4-bit checkpoint.", recommended_container_disk_gb=100, max_num_seqs=64, tool_call_parser="qwen3_coder"),
     "qwen3.6-27b": Model("qwen3.6-27b", "Qwen/Qwen3.6-27B", "27B", 48, "NVIDIA RTX A6000", max_model_len=32768, note="Lower-cost general coding alternative; 48 GB is recommended."),
 }
 
@@ -397,6 +398,8 @@ def cmd_deploy(args: argparse.Namespace) -> None:
         serve += ["--max-model-len", str(model.max_model_len)]
     if model.max_num_seqs:
         serve += ["--max-num-seqs", str(model.max_num_seqs)]
+    if model.tool_call_parser:
+        serve += ["--enable-auto-tool-choice", "--tool-call-parser", model.tool_call_parser]
     if count > 1:
         serve += ["--tensor-parallel-size", str(count)]
     serve += ["--api-key", vllm_key]
