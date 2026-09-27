@@ -309,30 +309,35 @@ def wait_for_vllm(pod_id: str, timeout_seconds: float) -> None:
 
 
 def show_quote(model: Model, gpu: str, count: int, cloud: str, hours: float) -> None:
-    """Print live Runpod pricing relevant to this exact deployment selection."""
-    listing = ctl_output(["gpu", "list"])
-    matching = [line.strip() for line in listing.splitlines() if gpu.lower() in line.lower()]
-    print(f"\nCost preflight — {model.key}: {count}x {gpu}, {cloud} cloud")
-    if not matching:
-        print("Runpod returned no exact matching GPU row. Choose an available GPU with `podcode gpus` before continuing.")
-        return
-    for line in matching:
-        print("  Live Runpod row:", line)
-    prices = [float(value) for value in re.findall(r"(?:\$|USD\s*)(\d+(?:\.\d+)?)", " ".join(matching), flags=re.I)]
-    if prices:
-        # runpodctl commonly prints Secure then Community price; show candidates
-        # rather than silently claiming an ambiguous table column is authoritative.
-        per_gpu = prices[0] if cloud == "SECURE" or len(prices) == 1 else prices[-1]
-        hourly = per_gpu * count
-        print(f"  Estimated GPU cost: ${hourly:.2f}/hour; about ${hourly * hours:.2f} for {hours:g} hour(s).")
+    """Render a compact deployment card from Runpod's live GPU inventory."""
+    try:
+        rows = json.loads(ctl_output(["gpu", "list"]))
+    except json.JSONDecodeError:
+        rows = []
+    matches = [row for row in rows if isinstance(row, dict) and row.get("gpuId", "").lower() == gpu.lower()] if isinstance(rows, list) else []
+    price_field = "securePricePerHr" if cloud.upper() == "SECURE" else "communityPricePerHr"
+    selected = next((row for row in matches if isinstance(row.get(price_field), (int, float))), matches[0] if matches else {})
+    price = selected.get(price_field) if isinstance(selected, dict) else None
+    stock = selected.get("stockStatus") if isinstance(selected, dict) else None
+
+    print(color(f"\n╭─ Deploy {model.key}", "36"))
+    print(f"│  Model     {model.huggingface_id}")
+    print(f"│  Compute   {count}× {gpu} · {cloud.upper()} cloud")
+    if stock:
+        print(f"│  Availability  {color(str(stock).upper(), '33' if str(stock).lower() != 'available' else '32')}")
+    if isinstance(price, (int, float)):
+        hourly = price * count
+        print(f"│  Live rate ${hourly:.2f}/hour")
+        print(f"│  Estimate  ${hourly * hours:.2f} for {hours:g} hour(s)")
     else:
-        print("  Price format could not be parsed; the live row above is authoritative.")
+        print("│  Live rate unavailable · check `podcode gpus`")
+    print(color("╰────────────────────────────────────────", "36"))
 
 
 def confirm(word: str, message: str) -> None:
-    print(message)
+    print(f"\n{color('!', '33')} {message}")
     try:
-        answer = input(f"Type {word} to continue: ").strip()
+        answer = input(f"Type {color(word, '33')} to continue › ").strip()
     except EOFError:
         answer = ""
     if answer != word:
