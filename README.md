@@ -93,6 +93,9 @@ podcode swap OLD_POD_ID qwen3.6-27b
 
 Use `--ephemeral` for disposable sessions: no persistent volume, no retained model download after termination.
 
+The `qwen3-coder-next` ephemeral preset requests a 100 GB container disk because
+its model download needs more than the Runpod 20–30 GB default.
+
 Without it, podcode creates a model-sized Pod volume (60 GB for Qwen3-Coder-Next) at `/workspace` so future starts avoid downloading weights again. For portable storage across replacement Pods, pass `--network-volume-id VOLUME_ID`.
 
 Delete a network volume explicitly only when you are finished with its contents:

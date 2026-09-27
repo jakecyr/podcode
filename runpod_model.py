@@ -42,6 +42,7 @@ class Model:
     max_model_len: int | None = None
     note: str = ""
     recommended_volume_gb: int = 60
+    recommended_container_disk_gb: int = 30
 
 
 # VRAM is a deployment floor, not a training requirement. Values assume inference
@@ -54,7 +55,7 @@ MODELS: dict[str, Model] = {
     "qwen2.5-coder-7b": Model("qwen2.5-coder-7b", "Qwen/Qwen2.5-Coder-7B-Instruct", "7B", 16, "NVIDIA GeForce RTX 3090", note="An economical 24 GB option."),
     "qwen2.5-coder-14b": Model("qwen2.5-coder-14b", "Qwen/Qwen2.5-Coder-14B-Instruct", "14B", 24, "NVIDIA GeForce RTX 4090", note="24 GB supports typical coding workloads."),
     "qwen2.5-coder-32b": Model("qwen2.5-coder-32b", "Qwen/Qwen2.5-Coder-32B-Instruct", "32B", 48, "NVIDIA A40", note="48 GB leaves useful room for KV cache."),
-    "qwen3-coder-next": Model("qwen3-coder-next", "RedHatAI/Qwen3-Next-80B-A3B-Instruct-quantized.w4a16", "80B MoE / 3B active", 48, "NVIDIA RTX A6000", max_model_len=32768, note="Default coding-agent choice; verified vLLM-compatible 4-bit checkpoint."),
+    "qwen3-coder-next": Model("qwen3-coder-next", "RedHatAI/Qwen3-Next-80B-A3B-Instruct-quantized.w4a16", "80B MoE / 3B active", 48, "NVIDIA RTX A6000", max_model_len=32768, note="Default coding-agent choice; verified vLLM-compatible 4-bit checkpoint.", recommended_container_disk_gb=100),
     "qwen3.6-27b": Model("qwen3.6-27b", "Qwen/Qwen3.6-27B", "27B", 48, "NVIDIA RTX A6000", max_model_len=32768, note="Lower-cost general coding alternative; 48 GB is recommended."),
 }
 
@@ -207,21 +208,25 @@ def wait_for_vllm(pod_id: str, timeout_seconds: float) -> None:
     index = 0
     stage = "Pod is starting"
     print("\nWaiting for vLLM to load model weights", end="", flush=True)
-    while time.monotonic() - started < timeout_seconds:
-        try:
-            with urllib.request.urlopen(url, timeout=10) as response:
-                if response.status == 200:
-                    elapsed = int(time.monotonic() - started)
-                    print(f"\r✓ vLLM is ready after {elapsed // 60}m {elapsed % 60:02d}s.{' ' * 20}")
-                    return
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
-            pass
-        elapsed = int(time.monotonic() - started)
-        if index % 5 == 0:
-            stage = vllm_loading_stage(pod_id)
-        print(f"\r{frames[index % len(frames)]} {stage} ({elapsed // 60}m {elapsed % 60:02d}s)", end="", flush=True)
-        index += 1
-        time.sleep(5)
+    try:
+        while time.monotonic() - started < timeout_seconds:
+            try:
+                with urllib.request.urlopen(url, timeout=10) as response:
+                    if response.status == 200:
+                        elapsed = int(time.monotonic() - started)
+                        print(f"\r✓ vLLM is ready after {elapsed // 60}m {elapsed % 60:02d}s.{' ' * 20}")
+                        return
+            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
+                pass
+            elapsed = int(time.monotonic() - started)
+            if index % 5 == 0:
+                stage = vllm_loading_stage(pod_id)
+            print(f"\r{frames[index % len(frames)]} {stage} ({elapsed // 60}m {elapsed % 60:02d}s)", end="", flush=True)
+            index += 1
+            time.sleep(5)
+    except KeyboardInterrupt:
+        print("\nReadiness monitor cancelled; the Pod was left running.")
+        return
     print()
     raise SystemExit(
         f"vLLM was not ready after {int(timeout_seconds // 60)} minute(s). The Pod may still be loading; "
@@ -297,7 +302,7 @@ def cmd_deploy(args: argparse.Namespace) -> None:
     count = args.gpu_count or model.gpu_count
     cloud = args.cloud_type or os.getenv("RUNPOD_CLOUD_TYPE", "SECURE")
     volume_gb = args.volume_gb or int(os.getenv("RUNPOD_VOLUME_GB", str(model.recommended_volume_gb)))
-    container_gb = args.container_disk_gb or int(os.getenv("RUNPOD_CONTAINER_DISK_GB", "30"))
+    container_gb = args.container_disk_gb or int(os.getenv("RUNPOD_CONTAINER_DISK_GB", str(model.recommended_container_disk_gb)))
     mount = os.getenv("RUNPOD_VOLUME_MOUNT_PATH", "/workspace")
     cache = "/root/.cache/huggingface" if args.ephemeral else os.getenv("RUNPOD_MODEL_CACHE", "/workspace/huggingface")
     name = args.name or f"llm-{model.key}"
