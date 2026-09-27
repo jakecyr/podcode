@@ -17,8 +17,9 @@ cd self-hosted-open-code
 ```
 
 On first use, `podcode` downloads Runpod CLI (`runpodctl`) automatically to
-`~/.local/bin` if it is not already available. Set `RUNPODCTL_BIN_DIR` to use
-a different location.
+`~/.local/bin` if it is not already available. `./install.sh` also installs
+OpenCode when it is missing. Set `RUNPODCTL_BIN_DIR` to use a different
+Runpod CLI location.
 
 If `podcode` is not found afterward, add `~/.local/bin` to your shell path:
 
@@ -70,7 +71,9 @@ Type `DEPLOY` when shown the live cost. This command:
 4. Uses ephemeral model storage, so model weights are discarded when you delete the Pod.
 5. Shows a loader until vLLM is ready to accept requests (up to 30 minutes by default; adjust with `--wait-timeout 45m`).
 
-Start OpenCode in that directory; it uses the configured `runpod/...` model by default.
+After readiness, podcode automatically refreshes and reloads its generated
+OpenCode configuration for the new Pod. Start OpenCode in that directory; it
+uses the configured `runpod/...` model by default.
 
 ## Models
 
@@ -94,6 +97,9 @@ podcode destroy POD_ID
 podcode swap OLD_POD_ID qwen3.6-27b
 ```
 
+When exactly one Pod exists, `wait` and `logs` infer its ID automatically.
+Use `--verbose` only when you need the underlying vLLM messages.
+
 ## Storage choices
 
 Use `--ephemeral` for disposable sessions: no persistent volume, no retained model download after termination.
@@ -114,4 +120,5 @@ podcode destroy POD_ID --delete-network-volume VOLUME_ID
 
 - `DEPLOY` and `REPLACE` confirmations cannot be bypassed.
 - Timer flags depend on the installed Runpod CLI version. If unavailable, `podcode` stops before creation rather than launching a Pod without the requested cost guard; delete it explicitly with `podcode destroy POD_ID` when finished.
+- Keep `RUNPOD_API_KEY`, `RUNPOD_VLLM_API_KEY`, and `HF_TOKEN` only in `.env`; podcode redacts them from the Pod-create response.
 - Runpod’s displayed live GPU price and Billing page are the source of truth. Storage and bandwidth can be separate charges.
