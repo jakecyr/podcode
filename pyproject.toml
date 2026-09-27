@@ -1,0 +1,8 @@
+[project]
+name = "podcode"
+version = "0.1.0"
+description = "A single-command Runpod Pod manager for open-weight LLMs"
+requires-python = ">=3.10"
+
+[project.scripts]
+podcode = "runpod_model:main"

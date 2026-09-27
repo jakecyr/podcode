@@ -1,0 +1,18 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "runpod": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Runpod vLLM",
+      "options": {
+        "baseURL": "https://l9jrri21b0g046-8000.proxy.runpod.net/v1",
+        "apiKey": "{env:RUNPOD_VLLM_API_KEY}"
+      },
+      "models": {
+        "RedHatAI/Qwen3-Next-80B-A3B-Instruct-quantized.w4a16": {
+          "name": "qwen3-coder-next"
+        }
+      }
+    }
+  }
+}
