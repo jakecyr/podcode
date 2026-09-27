@@ -174,6 +174,35 @@ def duration_seconds(value: str) -> float:
     return float(match.group(1)) * {"s": 1, "m": 60, "h": 3600}[match.group(2)]
 
 
+def color(text: str, code: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if sys.stdout.isatty() else text
+
+
+def concise_log_line(source: str, line: str) -> tuple[str, str] | None:
+    """Return a readable startup event, omitting banners and Python stack frames."""
+    text = line.strip().replace("\r", "")
+    lowered = text.lower()
+    if source == "system" and "start container" in lowered:
+        return ("info", "Container started")
+    if "resolved architecture" in lowered:
+        return ("info", "Model architecture recognized")
+    if "initializing a v1 llm engine" in lowered:
+        return ("info", "Initializing GPU inference engine")
+    if "loading model from scratch" in lowered:
+        return ("load", "Loading model weights onto GPU")
+    if "flashattention version" in lowered:
+        return ("info", "GPU attention kernels initialized")
+    if "application startup complete" in lowered or "uvicorn running on" in lowered:
+        return ("ready", "vLLM API is ready")
+    if "not enough free disk space" in lowered:
+        return ("error", "Insufficient container disk while downloading model")
+    if "background writer channel closed" in lowered:
+        return ("error", "Model download failed; Hugging Face cache writer stopped")
+    if "engine core initialization failed" in lowered:
+        return ("error", "vLLM engine failed to start")
+    return None
+
+
 def vllm_loading_stage(pod_id: str) -> str:
     """Summarize the most recent useful vLLM startup state without printing logs."""
     result = subprocess.run(
@@ -221,7 +250,7 @@ def wait_for_vllm(pod_id: str, timeout_seconds: float) -> None:
             elapsed = int(time.monotonic() - started)
             if index % 5 == 0:
                 stage = vllm_loading_stage(pod_id)
-            print(f"\r{frames[index % len(frames)]} {stage} ({elapsed // 60}m {elapsed % 60:02d}s)", end="", flush=True)
+            print(f"\r\033[2K{color(frames[index % len(frames)], '36')} {stage} ({elapsed // 60}m {elapsed % 60:02d}s)", end="", flush=True)
             index += 1
             time.sleep(5)
     except KeyboardInterrupt:
@@ -395,8 +424,33 @@ def cmd_wait(args: argparse.Namespace) -> None:
 
 
 def cmd_logs(args: argparse.Namespace) -> None:
-    """Pass through container logs for detailed startup diagnosis."""
-    ctl(["pod", "logs", resolve_pod_id(args.pod_id), "--follow"])
+    """Stream readable Pod startup events, with raw logs available via --verbose."""
+    pod_id = resolve_pod_id(args.pod_id)
+    command = [require_ctl(), "pod", "logs", pod_id, "--follow"]
+    print(color(f"Streaming Pod {pod_id} logs (Ctrl-C to stop)", "36"))
+    process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=os.environ.copy())
+    try:
+        assert process.stdout is not None
+        for raw in process.stdout:
+            try:
+                event = json.loads(raw)
+                source, line = str(event.get("source", "container")), str(event.get("line", ""))
+            except json.JSONDecodeError:
+                if args.verbose:
+                    print(raw.rstrip())
+                continue
+            summary = concise_log_line(source, line)
+            if summary:
+                kind, message = summary
+                marker, shade = {"info": ("●", "36"), "load": ("◌", "33"), "ready": ("✓", "32"), "error": ("✗", "31")}[kind]
+                print(f"{color(marker, shade)} {message}")
+            elif args.verbose:
+                print(color(f"{source}: ", "2") + line)
+    except KeyboardInterrupt:
+        print("\nLog stream stopped.")
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
 
 
 def cmd_control(args: argparse.Namespace) -> None:
@@ -490,6 +544,7 @@ def parser() -> argparse.ArgumentParser:
     wait.set_defaults(func=cmd_wait)
     logs = sub.add_parser("logs", help="stream detailed container logs for a Pod")
     logs.add_argument("pod_id", nargs="?", help="Pod ID; inferred when exactly one Pod exists")
+    logs.add_argument("--verbose", action="store_true", help="also show unfiltered raw log lines")
     logs.set_defaults(func=cmd_logs)
     sub.add_parser("usage", help="show Pods and billing guidance").set_defaults(func=cmd_usage)
 
