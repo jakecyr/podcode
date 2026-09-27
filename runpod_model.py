@@ -334,6 +334,35 @@ def show_quote(model: Model, gpu: str, count: int, cloud: str, hours: float) -> 
     print(color("╰────────────────────────────────────────", "36"))
 
 
+def fallback_gpu(model: Model, requested_gpu: str, cloud: str) -> str | None:
+    """Return the lowest-cost currently listed compatible GPU, if one exists."""
+    try:
+        rows = json.loads(ctl_output(["gpu", "list"]))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(rows, list):
+        return None
+    cloud_key = "secureCloud" if cloud.upper() == "SECURE" else "communityCloud"
+    price_key = "securePricePerHr" if cloud.upper() == "SECURE" else "communityPricePerHr"
+    candidates = [
+        row for row in rows
+        if isinstance(row, dict)
+        and row.get("available")
+        and row.get(cloud_key)
+        and isinstance(row.get("memoryInGb"), (int, float))
+        and row["memoryInGb"] >= model.min_vram_gb
+        and row.get("gpuId") != requested_gpu
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda row: (
+        float(row[price_key]) if isinstance(row.get(price_key), (int, float)) else float("inf"),
+        str(row.get("gpuId", "")),
+    ))
+    candidate = candidates[0].get("gpuId")
+    return str(candidate) if candidate else None
+
+
 def confirm(word: str, message: str) -> None:
     print(f"\n{color('!', '33')} {message}")
     try:
@@ -370,9 +399,49 @@ def cmd_models(_: argparse.Namespace) -> None:
         print(f"{model.key:<25} {model.parameters:<7} {model.min_vram_gb:>4} GB  {gpu:<31} {model.note}")
 
 
-def cmd_gpus(_: argparse.Namespace) -> None:
-    """Show real-time GPU availability and hourly price directly from Runpod."""
-    ctl(["gpu", "list"])
+def cmd_gpus(args: argparse.Namespace) -> None:
+    """Show the useful portion of Runpod's live GPU inventory."""
+    raw = ctl_output(["gpu", "list"])
+    try:
+        rows = json.loads(raw)
+    except json.JSONDecodeError:
+        print(raw, end="" if raw.endswith("\n") else "\n")
+        return
+    if not isinstance(rows, list):
+        print(raw, end="" if raw.endswith("\n") else "\n")
+        return
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+
+    def number(row: dict, key: str) -> float:
+        value = row.get(key)
+        return float(value) if isinstance(value, (int, float)) else float("inf")
+
+    rows = [row for row in rows if isinstance(row, dict) and row.get("available")]
+    rows.sort(key=lambda row: (number(row, "securePricePerHr"), str(row.get("displayName", ""))))
+    print(color("\nLive Runpod GPU availability", "36"))
+    print(color("GPU                              VRAM   SECURE    COMMUNITY  STOCK  AVAILABLE LOCATIONS", "2"))
+    if not rows:
+        print("No currently available GPU types were returned. Try again shortly.")
+        return
+    for row in rows:
+        name = str(row.get("displayName") or row.get("gpuId") or "Unknown GPU")[:32]
+        memory = row.get("memoryInGb")
+        secure = row.get("securePricePerHr")
+        community = row.get("communityPricePerHr")
+        stock = str(row.get("stockStatus") or "unknown")
+        locations = [str(item.get("dataCenterId")) for item in row.get("dataCenterAvailability", [])
+                     if isinstance(item, dict) and str(item.get("stockStatus", "")).lower() not in {"none", "", "unavailable"}]
+        location_text = ", ".join(locations[:3]) or "—"
+        if len(locations) > 3:
+            location_text += f" +{len(locations) - 3}"
+        secure_text = f"${secure:.2f}/h" if isinstance(secure, (int, float)) else "—"
+        community_text = f"${community:.2f}/h" if isinstance(community, (int, float)) else "—"
+        stock_color = "32" if stock.lower() == "available" else "33"
+        print(f"{name:<32} {str(memory or '—') + ' GB':>6}  {secure_text:>8}  {community_text:>9}  "
+              f"{color(f'{stock.upper():<5}', stock_color)}  {location_text}")
+    print(color("\nRates are per GPU per hour. Availability can change before Pod creation.", "2"))
 
 
 def cmd_deploy(args: argparse.Namespace) -> None:
@@ -433,6 +502,17 @@ def cmd_deploy(args: argparse.Namespace) -> None:
     if args.terminate_after:
         command += ["--terminate-after", args.terminate_after]
     result = ctl(command, capture=True, check=False)
+    unavailable = "no longer any instances available" in (result.stderr + result.stdout).lower()
+    # Only the default choice falls back: an explicit --gpu is a user decision.
+    if result.returncode and unavailable and args.gpu is None:
+        replacement_gpu = fallback_gpu(model, gpu, cloud)
+        if replacement_gpu:
+            print(color(f"\n{gpu} became unavailable before Runpod could reserve it.", "33"))
+            print("Trying the next compatible live GPU:")
+            show_quote(model, replacement_gpu, count, cloud, args.estimate_hours)
+            confirm("DEPLOY", f"This creates the same billable Pod using {replacement_gpu}.")
+            command[command.index("--gpu-id") + 1] = replacement_gpu
+            result = ctl(command, capture=True, check=False)
     if result.returncode:
         message = result.stderr.strip() or result.stdout.strip() or "runpodctl could not create the Pod."
         raise SystemExit(message)
@@ -612,7 +692,9 @@ def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="podcode", description="Deploy and operate open-weight coding models on Runpod.")
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("models", help="list model presets and GPU recommendations").set_defaults(func=cmd_models)
-    sub.add_parser("gpus", help="show live Runpod GPU availability and prices").set_defaults(func=cmd_gpus)
+    gpus = sub.add_parser("gpus", help="show live Runpod GPU availability and prices")
+    gpus.add_argument("--json", action="store_true", help="print the unformatted Runpod inventory for scripts")
+    gpus.set_defaults(func=cmd_gpus)
     sub.add_parser("status", help="list all Pods").set_defaults(func=cmd_status)
     wait = sub.add_parser("wait", help="poll vLLM readiness and GPU model-loading progress")
     wait.add_argument("pod_id", nargs="?", help="Pod ID; inferred when exactly one Pod exists")
