@@ -2,7 +2,7 @@
 
 Deploy an open-weight coding model to Runpod and connect local [OpenCode](https://opencode.ai) in one command.
 
-`podcode up` shows the current Runpod GPU price, estimates the selected time window, and requires typed confirmation before it creates anything.
+`podcode up` shows the current Runpod GPU price, estimates the selected time window, and requires a `y` or `yes` confirmation before it creates anything.
 
 ## Quick start
 
@@ -63,7 +63,7 @@ With no arguments, `podcode up` deploys `qwen3-coder-next`, estimates a
 10-hour session, and uses ephemeral storage. Override the model or use
 `--persistent` when you need retained model storage.
 
-Type `DEPLOY` when shown the live cost. This command:
+Type `y` or `yes` when shown the live cost. Any other response cancels. This command:
 
 1. Selects the recommended GPU for the model.
 2. Starts vLLM on Runpod with an API key.
@@ -73,7 +73,8 @@ Type `DEPLOY` when shown the live cost. This command:
 
 After readiness, podcode automatically refreshes and reloads its generated
 OpenCode configuration for the new Pod. Start OpenCode in that directory; it
-uses the configured `runpod/...` model by default.
+uses the configured `runpod/...` model by default. Wait for `podcode up` to
+print the OpenCode configuration confirmation before opening OpenCode.
 
 ## Models
 
@@ -91,9 +92,9 @@ podcode status
 podcode wait                    # live GPU/model-loading stage; uses the only Pod automatically
 podcode logs                    # colorized startup/error events; uses the only Pod automatically
 podcode logs --verbose          # include raw vLLM logs
-podcode stop POD_ID
+podcode stop [POD_ID]              # infers the ID when exactly one Pod is running
 podcode start POD_ID
-podcode destroy POD_ID
+podcode destroy [POD_ID]           # infers the ID when exactly one Pod exists
 podcode swap OLD_POD_ID qwen3.6-27b
 ```
 
@@ -106,8 +107,9 @@ Use `--ephemeral` for disposable sessions: no persistent volume, no retained mod
 
 The `qwen3-coder-next` ephemeral preset requests a 100 GB container disk because
 its model download needs more than the Runpod 20–30 GB default. On a 48 GB GPU,
-it also caps vLLM concurrency at 64 sequences so its Mamba cache can initialize,
-and enables Qwen's vLLM tool-call parser for OpenCode agents.
+it reserves 98% of VRAM for vLLM and caps concurrency at 8 sequences so the
+40.9 GiB checkpoint still leaves room for its KV/Mamba cache. It also enables
+Qwen's vLLM tool-call parser for OpenCode agents.
 
 Without it, podcode creates a model-sized Pod volume (60 GB for Qwen3-Coder-Next) at `/workspace` so future starts avoid downloading weights again. For portable storage across replacement Pods, pass `--network-volume-id VOLUME_ID`.
 
@@ -119,7 +121,7 @@ podcode destroy POD_ID --delete-network-volume VOLUME_ID
 
 ## Safety and costs
 
-- `DEPLOY` and `REPLACE` confirmations cannot be bypassed.
+- `up` requires `y` or `yes`; direct `deploy` and `swap` retain their `DEPLOY` and `REPLACE` confirmations.
 - Timer flags depend on the installed Runpod CLI version. If unavailable, `podcode` stops before creation rather than launching a Pod without the requested cost guard; delete it explicitly with `podcode destroy POD_ID` when finished.
 - Keep `RUNPOD_API_KEY`, `RUNPOD_VLLM_API_KEY`, and `HF_TOKEN` only in `.env`; podcode redacts them from the Pod-create response.
 - Runpod’s displayed live GPU price and Billing page are the source of truth. Storage and bandwidth can be separate charges.

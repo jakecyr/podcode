@@ -47,6 +47,7 @@ class Model:
     recommended_volume_gb: int = 60
     recommended_container_disk_gb: int = 30
     max_num_seqs: int | None = None
+    gpu_memory_utilization: float | None = None
     tool_call_parser: str | None = None
 
 
@@ -60,7 +61,7 @@ MODELS: dict[str, Model] = {
     "qwen2.5-coder-7b": Model("qwen2.5-coder-7b", "Qwen/Qwen2.5-Coder-7B-Instruct", "7B", 16, "NVIDIA GeForce RTX 3090", note="An economical 24 GB option."),
     "qwen2.5-coder-14b": Model("qwen2.5-coder-14b", "Qwen/Qwen2.5-Coder-14B-Instruct", "14B", 24, "NVIDIA GeForce RTX 4090", note="24 GB supports typical coding workloads."),
     "qwen2.5-coder-32b": Model("qwen2.5-coder-32b", "Qwen/Qwen2.5-Coder-32B-Instruct", "32B", 48, "NVIDIA A40", note="48 GB leaves useful room for KV cache."),
-    "qwen3-coder-next": Model("qwen3-coder-next", "RedHatAI/Qwen3-Next-80B-A3B-Instruct-quantized.w4a16", "80B MoE / 3B active", 48, "NVIDIA RTX A6000", max_model_len=32768, note="Default coding-agent choice; verified vLLM-compatible 4-bit checkpoint.", recommended_container_disk_gb=100, max_num_seqs=64, tool_call_parser="qwen3_coder"),
+    "qwen3-coder-next": Model("qwen3-coder-next", "RedHatAI/Qwen3-Next-80B-A3B-Instruct-quantized.w4a16", "80B MoE / 3B active", 48, "NVIDIA RTX A6000", max_model_len=32768, note="Default coding-agent choice; verified vLLM-compatible 4-bit checkpoint.", recommended_container_disk_gb=100, max_num_seqs=8, gpu_memory_utilization=0.98, tool_call_parser="qwen3_coder"),
     "qwen3.6-27b": Model("qwen3.6-27b", "Qwen/Qwen3.6-27B", "27B", 48, "NVIDIA RTX A6000", max_model_len=32768, note="Lower-cost general coding alternative; 48 GB is recommended."),
 }
 
@@ -228,8 +229,14 @@ def concise_log_line(source: str, line: str) -> tuple[str, str] | None:
         return ("info", "Initializing GPU inference engine")
     if "loading model from scratch" in lowered:
         return ("load", "Loading model weights onto GPU")
+    if "time spent downloading weights" in lowered:
+        return ("info", "Model weights downloaded")
     if "flashattention version" in lowered:
         return ("info", "GPU attention kernels initialized")
+    if "torch.compile took" in lowered:
+        return ("info", "GPU model compilation finished")
+    if "initial profiling/warmup run took" in lowered:
+        return ("info", "GPU warmup finished")
     if "application startup complete" in lowered or "uvicorn running on" in lowered:
         return ("ready", "vLLM API is ready")
     if "not enough free disk space" in lowered:
@@ -244,7 +251,7 @@ def concise_log_line(source: str, line: str) -> tuple[str, str] | None:
 def vllm_loading_stage(pod_id: str) -> str:
     """Summarize the most recent useful vLLM startup state without printing logs."""
     result = subprocess.run(
-        [require_ctl(), "pod", "logs", pod_id, "--tail", "50", "--source", "container"],
+        [require_ctl(), "pod", "logs", pod_id, "--tail", "200", "--source", "container"],
         text=True, capture_output=True, check=False, env=os.environ.copy(),
     )
     lines: list[str] = []
@@ -258,8 +265,18 @@ def vllm_loading_stage(pod_id: str) -> str:
     latest_load = max((index for index, line in enumerate(lines) if "loading model from scratch" in line.lower() or "loading model weights" in line.lower()), default=-1)
     if latest_error > latest_load:
         return "vLLM reported a startup error; inspect `podcode logs " + pod_id + "`"
-    if "api server" in recent and "started" in recent:
+    if "application startup complete" in recent or "uvicorn running on" in recent:
+        return "vLLM API is ready"
+    if "starting vllm server" in recent or "started server process" in recent:
         return "vLLM API server is starting"
+    if "initial profiling/warmup run" in recent or "warming up" in recent or "capturing cuda graphs" in recent:
+        return "GPU is warming kernels and capturing graphs"
+    if "torch.compile" in recent or "compiling a graph" in recent:
+        return "GPU is compiling the model"
+    if "loading safetensors checkpoint shards" in recent or "loading weights took" in recent:
+        return "GPU is loading model weights"
+    if "downloading weights" in recent:
+        return "Downloading model weights"
     if "loading model from scratch" in recent or "loading model weights" in recent:
         return "GPU is loading model weights"
     if "resolved architecture" in recent or "initializing a v1 llm engine" in recent:
@@ -284,7 +301,12 @@ def wait_for_vllm(pod_id: str, timeout_seconds: float) -> None:
     try:
         while time.monotonic() - started < timeout_seconds:
             try:
-                request = urllib.request.Request(url, headers={"Authorization": f"Bearer {vllm_key}"})
+                # Runpod's Cloudflare proxy rejects Python's default urllib
+                # user agent with error 1010 even when vLLM is healthy.
+                request = urllib.request.Request(url, headers={
+                    "Authorization": f"Bearer {vllm_key}",
+                    "User-Agent": "podcode/0.1",
+                })
                 with urllib.request.urlopen(request, timeout=10) as response:
                     if response.status == 200:
                         elapsed = int(time.monotonic() - started)
@@ -374,6 +396,18 @@ def confirm(word: str, message: str) -> None:
         raise SystemExit("Cancelled. No Runpod resources were created or deleted.")
 
 
+def confirm_yes(message: str) -> None:
+    """Continue only for an explicit yes; every other response cancels."""
+    print(f"\n{color('!', '33')} {message}")
+    try:
+        answer = input(f"Continue? {color('[y/N]', '33')} › ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled. No Runpod resources were created or deleted.")
+        raise SystemExit(0)
+    if answer not in {"y", "yes"}:
+        raise SystemExit("Cancelled. No Runpod resources were created or deleted.")
+
+
 def state() -> dict:
     if not STATE_PATH.exists():
         return {"deployments": {}}
@@ -394,10 +428,42 @@ def choose_model(key: str) -> Model:
 
 
 def cmd_models(_: argparse.Namespace) -> None:
-    print("MODEL                     PARAMS  MIN VRAM  RECOMMENDED GPU                 NOTES")
+    print(color("\nAvailable model presets", "36"))
+    print(color("MODEL                     PARAMS  MIN VRAM  RECOMMENDED GPU                 NOTES", "2"))
     for model in MODELS.values():
         gpu = f"{model.gpu_count}x {model.preferred_gpu}" if model.gpu_count > 1 else model.preferred_gpu
         print(f"{model.key:<25} {model.parameters:<7} {model.min_vram_gb:>4} GB  {gpu:<31} {model.note}")
+
+
+def list_pods() -> list[dict]:
+    """Return Runpod's Pod list with a consistent error for malformed output."""
+    try:
+        pods = json.loads(ctl_output(["pod", "list", "--all"]))
+    except json.JSONDecodeError as error:
+        raise SystemExit("Runpod returned an unreadable Pod list.") from error
+    if not isinstance(pods, list):
+        raise SystemExit("Runpod returned an unexpected Pod list.")
+    return [pod for pod in pods if isinstance(pod, dict)]
+
+
+def print_pods(pods: list[dict], *, heading: str = "Runpod Pods") -> None:
+    """Render Pod inventory without dumping Runpod's raw JSON."""
+    print(color(f"\n{heading}", "36"))
+    if not pods:
+        print("No Pods found.")
+        return
+    print(color("ID                    STATUS      GPU                              NAME", "2"))
+    for pod in pods:
+        pod_id = str(pod.get("id") or "—")
+        status = str(pod.get("desiredStatus") or pod.get("status") or "unknown").upper()
+        machine = pod.get("machine") if isinstance(pod.get("machine"), dict) else {}
+        gpu = str(machine.get("gpuDisplayName") or pod.get("gpuDisplayName") or "—")
+        count = pod.get("gpuCount")
+        if isinstance(count, int) and count > 1:
+            gpu = f"{count}x {gpu}"
+        name = str(pod.get("name") or "—")
+        shade = "32" if status == "RUNNING" else "33" if status in {"EXITED", "STOPPED"} else "2"
+        print(f"{pod_id:<21} {color(f'{status:<11}', shade)} {gpu[:32]:<32} {name}")
 
 
 def cmd_gpus(args: argparse.Namespace) -> None:
@@ -459,20 +525,26 @@ def cmd_deploy(args: argparse.Namespace) -> None:
     require_timer_support(args.stop_after, args.terminate_after)
     if not getattr(args, "confirmed", False):
         show_quote(model, gpu, count, cloud, args.estimate_hours)
-        confirm("DEPLOY", f"This will create a billable Runpod Pod named '{name}' and download {model.huggingface_id}.")
+        message = f"This will create a billable Runpod Pod named '{name}' and download {model.huggingface_id}."
+        if getattr(args, "yes_no_confirm", False):
+            confirm_yes(message)
+        else:
+            confirm("DEPLOY", message)
     vllm_key = os.getenv("RUNPOD_VLLM_API_KEY")
     if not vllm_key:
         raise SystemExit("RUNPOD_VLLM_API_KEY is required to protect the public vLLM endpoint. Set it in .env.")
 
     # vllm/vllm-openai has a vLLM entrypoint, so these are its arguments rather
     # than a nested `vllm serve` command.
-    serve = ["--model", model.huggingface_id, "--host", "0.0.0.0", "--port", "8000", "--download-dir", cache]
+    serve = [model.huggingface_id, "--host", "0.0.0.0", "--port", "8000", "--download-dir", cache]
     if model.quantization:
         serve += ["--quantization", model.quantization]
     if model.max_model_len:
         serve += ["--max-model-len", str(model.max_model_len)]
     if model.max_num_seqs:
         serve += ["--max-num-seqs", str(model.max_num_seqs)]
+    if model.gpu_memory_utilization:
+        serve += ["--gpu-memory-utilization", str(model.gpu_memory_utilization)]
     if model.tool_call_parser:
         serve += ["--enable-auto-tool-choice", "--tool-call-parser", model.tool_call_parser]
     if count > 1:
@@ -532,19 +604,14 @@ def cmd_deploy(args: argparse.Namespace) -> None:
 
 
 def cmd_status(_: argparse.Namespace) -> None:
-    ctl(["pod", "list", "--all"])
-    print("\nTip: `runpodctl pod get POD_ID` shows SSH and proxy connection details.")
+    print_pods(list_pods())
+    print(color("\nTip: `runpodctl pod get POD_ID` shows SSH and proxy details.", "2"))
 
 
 def resolve_pod_id(pod_id: str | None) -> str:
     if pod_id:
         return pod_id
-    try:
-        pods = json.loads(ctl_output(["pod", "list", "--all"]))
-    except json.JSONDecodeError as error:
-        raise SystemExit("Runpod returned an unreadable Pod list; specify POD_ID explicitly.") from error
-    if not isinstance(pods, list):
-        raise SystemExit("Runpod returned an unexpected Pod list; specify POD_ID explicitly.")
+    pods = list_pods()
     if len(pods) == 1 and isinstance(pods[0], dict) and isinstance(pods[0].get("id"), str):
         inferred = pods[0]["id"]
         print(f"Using the only Pod: {inferred}")
@@ -552,6 +619,26 @@ def resolve_pod_id(pod_id: str | None) -> str:
     if not pods:
         raise SystemExit("No Pods found. Create one with `podcode up MODEL` first.")
     raise SystemExit("Multiple Pods found; specify POD_ID (see `podcode status`).")
+
+
+def resolve_running_pod_id(pod_id: str | None) -> str:
+    """Resolve the sole running Pod while ignoring stopped Pods."""
+    if pod_id:
+        return pod_id
+    pods = list_pods()
+    running = [
+        pod for pod in pods
+        if isinstance(pod, dict)
+        and str(pod.get("desiredStatus") or pod.get("status") or "").upper() == "RUNNING"
+        and isinstance(pod.get("id"), str)
+    ]
+    if len(running) == 1:
+        inferred = running[0]["id"]
+        print(f"Using the only running Pod: {inferred}")
+        return inferred
+    if not running:
+        raise SystemExit("No running Pods found. Start one with `podcode start POD_ID` or create one with `podcode up`.")
+    raise SystemExit("Multiple running Pods found; specify POD_ID (see `podcode status`).")
 
 
 def cmd_wait(args: argparse.Namespace) -> None:
@@ -590,15 +677,24 @@ def cmd_logs(args: argparse.Namespace) -> None:
 
 
 def cmd_control(args: argparse.Namespace) -> None:
-    ctl(["pod", args.action, args.pod_id])
+    pod_id = resolve_running_pod_id(args.pod_id) if args.action == "stop" else args.pod_id
+    ctl(["pod", args.action, pod_id], capture=True)
+    verb = {"start": "started", "stop": "stopped", "restart": "restarted"}[args.action]
+    print(color(f"\n✓ Pod {verb}", "32"))
+    print(f"  {color('Pod ID:', '2')} {pod_id}")
 
 
 def cmd_destroy(args: argparse.Namespace) -> None:
-    print(f"Deleting Pod {args.pod_id}. This is permanent; Pod-attached volume data will not be recoverable.")
-    ctl(["pod", "delete", args.pod_id])
+    pod_id = resolve_pod_id(args.pod_id)
+    print(f"Deleting Pod {pod_id}. This is permanent; Pod-attached volume data will not be recoverable.")
+    ctl(["pod", "delete", pod_id], capture=True)
+    print(color("\n✓ Pod deleted", "32"))
+    print(f"  {color('Pod ID:', '2')} {pod_id}")
     if args.delete_network_volume:
         print(f"Deleting network volume {args.delete_network_volume}.")
-        ctl(["network-volume", "delete", args.delete_network_volume])
+        ctl(["network-volume", "delete", args.delete_network_volume], capture=True)
+        print(color("✓ Network volume deleted", "32"))
+        print(f"  {color('Volume ID:', '2')} {args.delete_network_volume}")
 
 
 def cmd_swap(args: argparse.Namespace) -> None:
@@ -665,9 +761,13 @@ def cmd_up(args: argparse.Namespace) -> None:
     """Single-command path: deploy the model, then create local OpenCode config."""
     pod_id = cmd_deploy(args)
     if not pod_id:
-        print("\nPod was created, but this runpodctl version did not return a recognizable Pod ID.")
-        print(f"Run `podcode status`, then: podcode opencode-config POD_ID {args.model}")
-        return
+        # Some runpodctl releases change their create-response shape. Recover
+        # automatically when the new Pod is the only Pod rather than silently
+        # leaving OpenCode pointed at an older deployment.
+        print("\nThe create response did not contain a recognizable Pod ID; checking the Pod list…")
+        pod_id = resolve_pod_id(None)
+        wait_for_vllm(pod_id, args.wait_timeout)
+    print(color("\nConfiguring OpenCode automatically…", "36"))
     config_args = argparse.Namespace(pod_id=pod_id, model=args.model, output=args.opencode_output, force=args.force_opencode_config)
     cmd_opencode(config_args)
 
@@ -678,9 +778,9 @@ def cmd_volume(args: argparse.Namespace) -> None:
 
 
 def cmd_usage(_: argparse.Namespace) -> None:
-    print("Current Pods (their live hourly rate is shown by `podcode gpus`):")
-    ctl(["pod", "list", "--all"])
-    print(textwrap.dedent("""
+    print_pods(list_pods(), heading="Current billable resources")
+    print(textwrap.dedent("""\
+
         Runpod charges based on the actual selected GPU, cloud tier, storage, and
         running time. Use `podcode gpus` before deployment for the current
         hourly rate, and Runpod Console → Billing for the authoritative accrued
@@ -739,7 +839,7 @@ def parser() -> argparse.ArgumentParser:
     add_deploy_options(up, up_defaults=True)
     up.add_argument("--opencode-output", default="opencode.json", help="local OpenCode config path")
     up.add_argument("--force-opencode-config", action="store_true", help="replace the generated OpenCode config if it exists")
-    up.set_defaults(func=cmd_up)
+    up.set_defaults(func=cmd_up, yes_no_confirm=True)
 
     swap = sub.add_parser("swap", help="delete a Pod and replace it with another model")
     swap.add_argument("pod_id", help="Pod to replace")
@@ -755,10 +855,11 @@ def parser() -> argparse.ArgumentParser:
 
     for action in ("start", "stop", "restart"):
         control = sub.add_parser(action, help=f"{action} a Pod")
-        control.add_argument("pod_id")
+        control.add_argument("pod_id", nargs="?" if action == "stop" else None,
+                             help="Pod ID; for stop, inferred when exactly one Pod is running")
         control.set_defaults(func=cmd_control, action=action)
     destroy = sub.add_parser("destroy", help="delete a Pod, optionally also a network volume")
-    destroy.add_argument("pod_id")
+    destroy.add_argument("pod_id", nargs="?", help="Pod ID; inferred when exactly one Pod exists")
     destroy.add_argument("--delete-network-volume", metavar="VOLUME_ID", help="also permanently delete this network volume")
     destroy.set_defaults(func=cmd_destroy)
     volume = sub.add_parser("volume", help="pass through a network-volume action to runpodctl")
